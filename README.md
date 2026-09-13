@@ -1,91 +1,39 @@
 # dynaprune
 
-Observation-driven dynamic pruning for served language models. Status: design only.
-Nothing here is implemented, deployed or measured beyond the cited prior art.
-
-You supply three things. dynaprune turns them into a served artifact with a paper trail.
+Take a model. Take observations of which parts matter. Drop the parts that don't. Verify it still works.
 
 ```
-observations + model + budget/policy  →  pruning plan  →  derived, verified artifact + serving config
+observations + model + budget → pruned model
 ```
 
-- **Observations** are inputs, not something dynaprune captures: routing mass, activation
-  or saliency telemetry, per-unit error proxies, KL-contribution measurements, or any
-  structured signal written against `schemas/observation.schema.json`.
-- **Model** is a public, pinned precision tier of a checkpoint (for example an EXL3 branch).
-- **Budget/policy** is a byte ceiling or prune fraction, a ranking function, structural
-  clamps, and the list of control arms that must be built alongside.
+**This is a design.** The code doesn't exist yet — deliberately. One script, ~100 lines, when the first real use case demands it.
 
-"Dynamic" lives at the configuration layer. One core derives any point on the
-(precision tier) × (non-uniform prune fraction) slider from the same inputs, and every
-point is verified independently before it can be served. Quality is never assumed to be
-monotonic in bytes; each point is measured and placed on a published frontier next to its
-controls, including the points that lose.
+## How it works
 
-## Roles
+1. **Observations in** — any JSON file mapping parts (experts, layers, heads) to importance scores. Routing mass, calibration error, KL contribution — whatever you measured.
+2. **Budget picks** — given a byte budget, a greedy solver keeps the highest-scoring parts until the budget is full.
+3. **Prune writes** — the output is a copy of the model with unimportant parts removed, router rows sliced, everything renumbered.
+4. **Verify gates** — measure the pruned model against the original. If quality drops too much, the prune is rejected. No silent degradation.
 
-| Role | Owns | Reads | Writes |
-|---|---|---|---|
-| Observation provider | Capturing signals against a public model revision | the model | an observation set (`observation.schema.json`) |
-| Planner | Ranking and byte-exact budget solving | observation set, policy | frozen plans, one per arm (`plan.schema.json`) |
-| Deriver | Tensor surgery: re-pack, renumber, slice routers | source shards, plan | derived shards, manifest (`manifest.schema.json`) |
-| Verifier | The measurement contract in `docs/METHOD.md` | derived artifact, sealed panels | receipts (`receipt.schema.json`) |
-| Serving adapter | Translating plan + manifest into engine config | manifest | engine launch config (SGLang first, vLLM second) |
-| Publisher | Immutable pins and the frontier | receipts, manifests | `frontier.json` (`frontier.schema.json`) |
-
-The planner and deriver never see evaluation results. The verifier never chooses. The
-publisher only records. That separation is the whole method.
-
-## How the pieces relate
+## The one file that matters
 
 ```
-   observation      policy
-   provider         (user)
-       │               │
-       ▼               ▼
-  ┌──────────────────────────┐
-  │ PLANNER  ingest→rank→solve│──▶ frozen plans: main + control arms
-  └──────────────────────────┘        │  (hashed, read-only, pre-registered)
-                                      ▼
-  pinned source tier ─────────▶ ┌──────────┐
-  (public revision + SHAs)      │ DERIVER  │──▶ derived shards + manifest
-                                └──────────┘        │
-                                                    ▼
-             sealed eval panel ─────────▶ ┌────────────────────┐
-             + teacher reference          │ VERIFIER  S3…S7     │──▶ receipts (append-only)
-             + fixtures                   └────────────────────┘        │
-                                                 │                      ▼
-                                                 ▼               ┌───────────┐
-                                        ┌────────────────┐       │ PUBLISHER │──▶ frontier.json
-                                        │ SERVING ADAPTER│       └───────────┘
-                                        │ sglang | vllm  │──▶ engine config for a point
-                                        └────────────────┘
+dynaprune/
+  README.md          ← this file
+  prune.py           ← the script (when written)
 ```
 
-Arrows carry files that validate against a schema in `schemas/`. Every file is
-content-addressed, so a point is reproducible by anyone holding the public source, the
-plan, and the packer version. No account, key or contact with the author is required.
+## Rules
 
-## Repository
+- Pruning is **irreversible** — always keep the original.
+- Quality is **measured, not assumed** — every pruned model gets verified against the same test panel as the original.
+- Selection uses **training data only** — test panels are for verification, never for choosing what to prune.
+- The budget is **bytes, not percentages** — different parts have different sizes.
 
-| Path | What it is |
-|---|---|
-| `docs/METHOD.md` | The scientific method: hypotheses, control metrics, required controls, step sequence, fleet allocation, decision rules |
-| `docs/ARCHITECTURE.md` | Language choice, file tree with line budgets, data contracts, pipeline stages, failure semantics, plugin boundary |
-| `docs/OPEN-QUESTIONS.md` | Ranked unknowns |
-| `schemas/` | JSON Schema (draft 2020-12) for observation, policy, plan, manifest, receipt, frontier |
-| `BRIEF.md` | The design brief this repository answers |
+## Prior art this stands on
 
-## Prior art
+- Pollard (write-gain-weighted bit allocation across layers)
+- brandonmusic (per-expert Hessian calibration for EXL3)
+- turboderp (the quants we're pruning)
 
-This generalizes an instance design for one MoE model on one workstation. The instance
-found that, at equal bytes on a weak base, uniform uncompensated expert pruning lost to
-bit-demotion (61.8% vs 77.4% top-1). Non-uniform, saliency-ranked, compensated pruning on
-a calibrated base is the open hypothesis dynaprune exists to test honestly. Academic
-anchors: STEP-style bias compensation, DiEP/LAEP layer-adaptive rates, and Pollard-style
-write-gain spread across layers as the argument for per-layer prune rates.
-
-## License
-
-MIT. Published artifacts carry no private hosts, paths, credentials, or unverified
-performance claims.
+MIT license. See LICENSE.
