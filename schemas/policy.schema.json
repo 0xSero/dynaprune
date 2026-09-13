@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dynaprune.dev/schemas/policy.schema.json",
+  "title": "dynaprune budget/policy",
+  "description": "What the user wants: a byte budget or explicit prune fraction, a precision tier, ranking and compensation choices, structural clamps, and which controls to generate alongside. Fully resolved by the planner into a frozen plan.",
+  "type": "object",
+  "required": ["schema_version", "model", "unit_type", "target", "ranking", "structure", "controls"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "model": { "$ref": "observation.schema.json#/$defs/modelRef" },
+    "unit_type": { "$ref": "observation.schema.json#/$defs/unitType" },
+    "target": {
+      "type": "object",
+      "description": "Exactly one of budget_bytes or prune_fraction. budget_bytes is resolved to the smallest block-quantized prune that fits.",
+      "oneOf": [
+        { "required": ["budget_bytes"], "not": { "required": ["prune_fraction"] } },
+        { "required": ["prune_fraction"], "not": { "required": ["budget_bytes"] } }
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "budget_bytes": { "type": "integer", "minimum": 1, "description": "Ceiling on total resident artifact bytes (weights only). KV and runtime overheads are accounted separately in admission." },
+        "prune_fraction": { "type": "number", "minimum": 0, "maximum": 0.95 },
+        "reserve_bytes": { "type": "integer", "minimum": 0, "default": 0, "description": "Bytes held back from budget_bytes for KV/graphs when the budget expresses a device ceiling." }
+      }
+    },
+    "ranking": {
+      "type": "object",
+      "required": ["function"],
+      "additionalProperties": false,
+      "properties": {
+        "function": { "type": "string", "description": "Built-ins: routed_mass, error_proxy, write_gain. Plus controls: random, frequency. Anything else must resolve to a registered plugin.", "examples": ["routed_mass", "error_proxy", "write_gain"] },
+        "params": { "type": "object", "description": "Ranker-specific parameters (e.g. weights for combined signals)." },
+        "seed": { "type": "integer", "description": "Required for random control; recorded for any stochastic ranker." },
+        "layer_rate": {
+          "type": "object",
+          "description": "How the per-layer prune rate is set (layer-adaptive rates are the point of non-uniform pruning).",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["uniform", "global_rank", "write_gain_proportional", "explicit"] },
+            "explicit_keep": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "layer → keep count; used when mode = explicit." },
+            "exponent": { "type": "number", "default": 1.0, "description": "Sharpness for write_gain_proportional." }
+          }
+        }
+      }
+    },
+    "compensation": {
+      "type": "object",
+      "description": "Optional STEP-style bias compensation applied at derivation. Requires a mean_output signal in the observation set.",
+      "required": ["method"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "enum": ["none", "mean_output_bias", "router_renorm", "mean_output_bias+router_renorm"] },
+        "scale": { "type": "number", "default": 1.0 }
+      }
+    },
+    "structure": {
+      "type": "object",
+      "required": ["block", "layer_floor"],
+      "additionalProperties": false,
+      "properties": {
+        "block": { "type": "integer", "minimum": 1, "description": "Units are removed in whole blocks of this size per layer (kernel alignment)." },
+        "layer_floor": { "type": "integer", "minimum": 1, "description": "Minimum retained units in any prunable layer; must be a multiple of block." },
+        "layer_ceiling": { "type": "integer", "minimum": 1, "description": "Maximum retained units (defaults to units_per_layer)." },
+        "protected_layers": { "type": "array", "items": { "type": "integer" }, "description": "Layers never pruned (dense layers, MTP heads, ...)." },
+        "protected_units": { "type": "array", "items": { "type": "string", "pattern": "^[0-9]+:[0-9]+$" }, "description": "layer:index pairs never pruned (e.g. shared experts)." }
+      }
+    },
+    "controls": {
+      "type": "array",
+      "description": "Control arms the planner must emit next to the main plan so no comparison is run without them (METHOD §3).",
+      "items": { "type": "string", "enum": ["equal_byte_demotion", "random_prune", "frequency_only", "unpruned_anchor", "uniform_prune"] },
+      "uniqueItems": true
+    },
+    "serving": {
+      "type": "object",
+      "description": "Adapter hints carried into the manifest; not part of selection.",
+      "additionalProperties": false,
+      "properties": {
+        "engine": { "type": "string", "enum": ["sglang", "vllm"] },
+        "context_tokens": { "type": "integer", "minimum": 1 },
+        "kv_dtype": { "type": "string" },
+        "tensor_parallel": { "type": "integer", "minimum": 1, "default": 1 }
+      }
+    }
+  }
+}
